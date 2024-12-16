@@ -279,7 +279,8 @@ static AsyncQueueControl *asyncQueueControl;
 #define QUEUE_BACKEND_PID(i)		(asyncQueueControl->backend[i].pid)
 #define QUEUE_BACKEND_DBOID(i)		(asyncQueueControl->backend[i].dboid)
 #define QUEUE_LISTENER_NEXT(i)		(asyncQueueControl->backend[i].nextListener)
-#define QUEUE_BACKEND_POS(i)		(asyncQueueControl->backend[i].pos)
+#define QUEUE_BACKEND_POS_VAL(i)	(asyncQueueControl->backend[i].pos)
+#define QUEUE_BACKEND_POS(i)		(QUEUE_POS_MAX(QUEUE_TAIL, asyncQueueControl->backend[i].pos))
 #define QUEUE_BACKEND_HASH(i,h)		(asyncQueueControl->backend[i].listenHash.hit[h])
 #define QUEUE_BACKEND_SIGNAL(i)		(asyncQueueControl->backend[i].signal)
 #define QUEUE_BACKEND_SIGNALLED(i)	(asyncQueueControl->backend[i].signalled)
@@ -515,7 +516,7 @@ AsyncShmemInit(void)
 			QUEUE_BACKEND_PID(i) = InvalidPid;
 			QUEUE_BACKEND_DBOID(i) = InvalidOid;
 			QUEUE_LISTENER_NEXT(i) = InvalidBackendId;
-			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, 0);
+			SET_QUEUE_POS(QUEUE_BACKEND_POS_VAL(i), 0, 0);
 		}
 	}
 
@@ -1026,7 +1027,7 @@ Exec_ListenPreCommit(void)
 				max = QUEUE_POS_MAX(max, QUEUE_BACKEND_POS(i));
 		}
 	}
-	QUEUE_BACKEND_POS(MyBackendId) = max;
+	QUEUE_BACKEND_POS_VAL(MyBackendId) = max;
 	QUEUE_BACKEND_PID(MyBackendId) = MyProcPid;
 	QUEUE_BACKEND_DBOID(MyBackendId) = MyDatabaseId;
 
@@ -1972,7 +1973,7 @@ asyncQueueReadAllNotifications(void)
 	{
 		/* Update shared state */
 		LWLockAcquire(AsyncQueueLock, LW_SHARED);
-		QUEUE_BACKEND_POS(MyBackendId) = pos;
+		QUEUE_BACKEND_POS_VAL(MyBackendId) = pos;
 		advanceTail = QUEUE_POS_EQUAL(oldpos, QUEUE_TAIL);
 		LWLockRelease(AsyncQueueLock);
 
@@ -1986,7 +1987,7 @@ asyncQueueReadAllNotifications(void)
 
 	/* Update shared state */
 	LWLockAcquire(AsyncQueueLock, LW_SHARED);
-	QUEUE_BACKEND_POS(MyBackendId) = pos;
+	QUEUE_BACKEND_POS_VAL(MyBackendId) = pos;
 	advanceTail = QUEUE_POS_EQUAL(oldpos, QUEUE_TAIL);
 	LWLockRelease(AsyncQueueLock);
 
@@ -2136,8 +2137,10 @@ asyncQueueAdvanceTail(void)
 	min = QUEUE_HEAD;
 	for (i = QUEUE_FIRST_LISTENER; i; i = QUEUE_LISTENER_NEXT(i))
 	{
-		if (QUEUE_BACKEND_PID(i) != InvalidPid)
+		if (QUEUE_BACKEND_PID(i) != InvalidPid && QUEUE_BACKEND_SIGNALLED(i)) {
+			QUEUE_BACKEND_SIGNALLED(i) = false;
 			min = QUEUE_POS_MIN(min, QUEUE_BACKEND_POS(i));
+		}
 	}
 	QUEUE_TAIL = min;
 	oldtailpage = QUEUE_STOP_PAGE;
