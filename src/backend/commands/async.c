@@ -1981,6 +1981,8 @@ asyncQueueReadAllNotifications(void)
 		if (advanceTail)
 			asyncQueueAdvanceTail();
 
+		QUEUE_BACKEND_SIGNALLED(MyBackendId) = false;
+
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -1994,6 +1996,8 @@ asyncQueueReadAllNotifications(void)
 	/* If we were the laziest backend, try to advance the tail pointer */
 	if (advanceTail)
 		asyncQueueAdvanceTail();
+
+	QUEUE_BACKEND_SIGNALLED(MyBackendId) = false;
 
 	/* Done with snapshot */
 	UnregisterSnapshot(snapshot);
@@ -2137,10 +2141,8 @@ asyncQueueAdvanceTail(void)
 	min = QUEUE_HEAD;
 	for (i = QUEUE_FIRST_LISTENER; i; i = QUEUE_LISTENER_NEXT(i))
 	{
-		if (QUEUE_BACKEND_PID(i) != InvalidPid && QUEUE_BACKEND_SIGNALLED(i)) {
-			QUEUE_BACKEND_SIGNALLED(i) = false;
+		if ((QUEUE_BACKEND_PID(i) != InvalidPid) && QUEUE_BACKEND_SIGNALLED(i))
 			min = QUEUE_POS_MIN(min, QUEUE_BACKEND_POS(i));
-		}
 	}
 	QUEUE_TAIL = min;
 	oldtailpage = QUEUE_STOP_PAGE;
