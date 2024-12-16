@@ -211,6 +211,15 @@ typedef struct QueuePosition
 	 (x).page != (y).page ? (x) : \
 	 (x).offset > (y).offset ? (x) : (y))
 
+/* Struct holding an array of hash values of active channels */
+#define LISTEN_HASH_BITS	8
+#define LISTEN_HASH_LENGTH	(1 << LISTEN_HASH_BITS)
+#define LISTEN_HASH_MASK	(LISTEN_HASH_LENGTH - 1)
+typedef struct ListenHashValues
+{
+	bool	hit[1 << LISTEN_HASH_BITS];
+} ListenHashValues;
+
 /*
  * Struct describing a listening backend's status
  */
@@ -220,6 +229,9 @@ typedef struct QueueBackendStatus
 	Oid			dboid;			/* backend's database OID, or InvalidOid */
 	int			nextListener;	/* backendid of next listener, 0=last */
 	QueuePosition pos;			/* backend has read queue up to here */
+	ListenHashValues	listenHash;	/* backend actively listening to a notify with this hash */
+	bool signal;
+	bool signalled;
 } QueueBackendStatus;
 
 /*
@@ -268,6 +280,9 @@ static AsyncQueueControl *asyncQueueControl;
 #define QUEUE_BACKEND_DBOID(i)		(asyncQueueControl->backend[i].dboid)
 #define QUEUE_LISTENER_NEXT(i)		(asyncQueueControl->backend[i].nextListener)
 #define QUEUE_BACKEND_POS(i)		(asyncQueueControl->backend[i].pos)
+#define QUEUE_BACKEND_HASH(i,h)		(asyncQueueControl->backend[i].listenHash.hit[h])
+#define QUEUE_BACKEND_SIGNAL(i)		(asyncQueueControl->backend[i].signal)
+#define QUEUE_BACKEND_SIGNALLED(i)	(asyncQueueControl->backend[i].signalled)
 
 #define QUEUE_FIRST_LISTENER		(asyncQueueControl->firstListener)
 
@@ -406,6 +421,18 @@ static void asyncQueueAdvanceTail(void);
 static void ProcessIncomingNotify(void);
 static bool AsyncExistsPendingNotify(const char *channel, const char *payload);
 static void ClearPendingActionsAndNotifies(void);
+
+static unsigned long
+listen_hash(const char *channel)
+{
+	unsigned char c;
+	unsigned long hash = 5381;
+
+	while ( (c = (unsigned char)(*channel++)) )
+		hash = hash * 33 ^ c;
+
+	return hash&LISTEN_HASH_MASK;
+}
 
 /*
  * We will work on the page range of 0..QUEUE_MAX_PAGE.
@@ -770,7 +797,8 @@ AtPrepare_Notify(void)
 	if (pendingActions || pendingNotifies)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot PREPARE a transaction that has executed LISTEN, UNLISTEN, or NOTIFY")));
+				 errmsg("cannot PREPARE a transaction that has executed LISTEN,"
+					 " UNLISTEN, or NOTIFY")));
 }
 
 /*
@@ -1056,6 +1084,12 @@ Exec_ListenCommit(const char *channel)
 	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 	listenChannels = lappend(listenChannels, pstrdup(channel));
 	MemoryContextSwitchTo(oldcontext);
+
+	/* Mark the listen hash to true */
+	QUEUE_BACKEND_HASH(MyBackendId, listen_hash(channel)) = true;
+	elog(WARNING, "=====> set hash 0x%04lx on %d for channel %s <=====",
+			listen_hash(channel), MyBackendId, channel);
+
 }
 
 /*
@@ -1398,6 +1432,7 @@ asyncQueueAddEntries(ListCell *nextNotify)
 	while (nextNotify != NULL)
 	{
 		Notification *n = (Notification *) lfirst(nextNotify);
+		unsigned long h = listen_hash(n->channel);
 
 		/* Construct a valid queue entry in local variable qe */
 		asyncQueueNotificationToEntry(n, &qe);
@@ -1443,6 +1478,15 @@ asyncQueueAddEntries(ListCell *nextNotify)
 			/* And exit the loop */
 			break;
 		}
+
+		/* Set signal flag so that we know to signal any listening processes.
+		 */
+		for (int i = QUEUE_FIRST_LISTENER; i; i = QUEUE_LISTENER_NEXT(i)) {
+			if (QUEUE_BACKEND_HASH(i, h)) {
+				QUEUE_BACKEND_SIGNAL(i) = true;
+			}
+		}
+
 	}
 
 	/* Success, so update the global QUEUE_HEAD */
@@ -1540,10 +1584,12 @@ asyncQueueFillWarning(void)
 		ereport(WARNING,
 				(errmsg("NOTIFY queue is %.0f%% full", fillDegree * 100),
 				 (minPid != InvalidPid ?
-				  errdetail("The server process with PID %d is among those with the oldest transactions.", minPid)
+				  errdetail("The server process with PID %d is among those"
+					  " with the oldest transactions.", minPid)
 				  : 0),
 				 (minPid != InvalidPid ?
-				  errhint("The NOTIFY queue cannot be emptied until that process ends its current transaction.")
+				  errhint("The NOTIFY queue cannot be emptied until that"
+					  " process ends its current transaction.")
 				  : 0)));
 
 		asyncQueueControl->lastQueueFillWarn = t;
@@ -1551,7 +1597,7 @@ asyncQueueFillWarning(void)
 }
 
 /*
- * Send signals to all listening backends (except our own).
+ * Send signals to listening backends (except our own).
  *
  * Returns true if we sent at least one signal.
  *
@@ -1594,8 +1640,11 @@ SignalBackends(void)
 		{
 			QueuePosition pos = QUEUE_BACKEND_POS(i);
 
-			if (!QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
+			if (!QUEUE_POS_EQUAL(pos, QUEUE_HEAD) && QUEUE_BACKEND_SIGNAL(i))
 			{
+				QUEUE_BACKEND_SIGNAL(i) = false;
+				QUEUE_BACKEND_SIGNALLED(i) = true;
+
 				pids[count] = pid;
 				ids[count] = i;
 				count++;
