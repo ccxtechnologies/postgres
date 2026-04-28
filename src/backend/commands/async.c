@@ -2143,7 +2143,7 @@ asyncQueueAdvanceTail(void)
 	min = QUEUE_HEAD;
 	for (i = QUEUE_FIRST_LISTENER; i; i = QUEUE_LISTENER_NEXT(i))
 	{
-		if (QUEUE_BACKEND_PID(i) != InvalidPid)
+		if ((QUEUE_BACKEND_PID(i) != InvalidPid) && QUEUE_BACKEND_SIGNALLED(i))
 			min = QUEUE_POS_MIN(min, QUEUE_BACKEND_POS(i));
 	}
 	QUEUE_TAIL = min;
