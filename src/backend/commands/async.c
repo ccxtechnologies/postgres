@@ -230,8 +230,9 @@ typedef struct QueueBackendStatus
 	int			nextListener;	/* backendid of next listener, 0=last */
 	QueuePosition pos;			/* backend has read queue up to here */
 	ListenHashValues	listenHash;	/* backend actively listening to a notify with this hash */
-	bool signal;
-	bool signalled;
+	bool signal;				/* pending signal */
+	bool signalled;				/* signal delivered */
+	bool reading;				/* actively reading local pages */
 } QueueBackendStatus;
 
 /*
@@ -284,6 +285,7 @@ static AsyncQueueControl *asyncQueueControl;
 #define QUEUE_BACKEND_HASH(i,h)		(asyncQueueControl->backend[i].listenHash.hit[h])
 #define QUEUE_BACKEND_SIGNAL(i)		(asyncQueueControl->backend[i].signal)
 #define QUEUE_BACKEND_SIGNALLED(i)	(asyncQueueControl->backend[i].signalled)
+#define QUEUE_BACKEND_READING(i)	(asyncQueueControl->backend[i].reading)
 
 #define QUEUE_FIRST_LISTENER		(asyncQueueControl->firstListener)
 
@@ -1865,6 +1867,7 @@ asyncQueueReadAllNotifications(void)
 	Assert(MyProcPid == QUEUE_BACKEND_PID(MyBackendId));
 	pos = oldpos = QUEUE_BACKEND_POS(MyBackendId);
 	head = QUEUE_HEAD;
+	QUEUE_BACKEND_READING(MyBackendId) = true;
 	LWLockRelease(AsyncQueueLock);
 
 	if (QUEUE_POS_EQUAL(pos, head))
@@ -1981,6 +1984,7 @@ asyncQueueReadAllNotifications(void)
 
 		LWLockAcquire(AsyncQueueLock, LW_SHARED);
 		QUEUE_BACKEND_SIGNALLED(MyBackendId) = false;
+		QUEUE_BACKEND_READING(MyBackendId) = false;
 		LWLockRelease(AsyncQueueLock);
 
 		PG_RE_THROW();
@@ -1999,6 +2003,7 @@ asyncQueueReadAllNotifications(void)
 
 	LWLockAcquire(AsyncQueueLock, LW_SHARED);
 	QUEUE_BACKEND_SIGNALLED(MyBackendId) = false;
+	QUEUE_BACKEND_READING(MyBackendId) = false;
 	LWLockRelease(AsyncQueueLock);
 
 	/* Done with snapshot */
@@ -2144,8 +2149,10 @@ asyncQueueAdvanceTail(void)
 	for (i = QUEUE_FIRST_LISTENER; i; i = QUEUE_LISTENER_NEXT(i))
 	{
 		if ((QUEUE_BACKEND_PID(i) != InvalidPid) &&
-			(QUEUE_BACKEND_SIGNALLED(i) || QUEUE_BACKEND_SIGNAL(i)))
+			(QUEUE_BACKEND_SIGNALLED(i) || QUEUE_BACKEND_SIGNAL(i) || QUEUE_BACKEND_READING(i)))
+		{
 			min = QUEUE_POS_MIN(min, QUEUE_BACKEND_POS(i));
+		}
 	}
 	QUEUE_TAIL = min;
 	oldtailpage = QUEUE_STOP_PAGE;
